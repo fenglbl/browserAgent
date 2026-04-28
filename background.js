@@ -5,6 +5,10 @@ import { runToolLoop, getToolList } from './agent.js';
 
 console.log('[BrowserAgent] Background service worker started');
 
+const CONVERSATION_KEY = 'agentConversation';
+const CONVERSATION_MAX_MESSAGES = 200; // 超过此数量触发压缩
+const CONVERSATION_KEEP_RECENT = 60;   // 压缩时保留最近的消息数
+
 let currentTask = {
   id: null,
   queue: [],
@@ -17,6 +21,60 @@ let currentTask = {
   turns: 0,
   command: ''
 };
+
+let conversationMessages = [];
+
+async function loadConversation() {
+  try {
+    const result = await chrome.storage.local.get(CONVERSATION_KEY);
+    conversationMessages = Array.isArray(result[CONVERSATION_KEY]) ? result[CONVERSATION_KEY] : [];
+  } catch {
+    conversationMessages = [];
+  }
+}
+
+async function saveConversation(messages) {
+  const compressed = compressConversationIfNeeded(messages);
+  conversationMessages = compressed;
+  await chrome.storage.local.set({ [CONVERSATION_KEY]: compressed });
+}
+
+async function clearConversation() {
+  conversationMessages = [];
+  await chrome.storage.local.remove(CONVERSATION_KEY);
+}
+
+function buildConversationSummary(messages) {
+  const entries = [];
+  for (const msg of messages) {
+    if (msg.role === 'user' && typeof msg.content === 'string') {
+      const text = msg.content.slice(0, 200).trim();
+      if (text) entries.push(`用户：${text}`);
+    } else if (msg.role === 'assistant' && typeof msg.content === 'string' && !msg.tool_calls) {
+      const text = msg.content.slice(0, 200).trim();
+      if (text) entries.push(`助手：${text}`);
+    }
+  }
+  return entries.join('\n').slice(0, 4000);
+}
+
+function compressConversationIfNeeded(messages) {
+  if (messages.length <= CONVERSATION_MAX_MESSAGES) return messages;
+
+  const systemMsg = messages[0];
+  const toCompress = messages.slice(1, -CONVERSATION_KEEP_RECENT);
+  const recentMessages = messages.slice(-CONVERSATION_KEEP_RECENT);
+
+  const summary = buildConversationSummary(toCompress);
+  const compressedMsg = {
+    role: 'system',
+    content: `[会话压缩摘要] 以下是之前对话的摘要，请基于此继续：\n\n${summary}`
+  };
+
+  const compressed = [systemMsg, compressedMsg, ...recentMessages];
+  console.log(`[BrowserAgent] 会话已压缩：${messages.length} 条 -> ${compressed.length} 条`);
+  return compressed;
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   console.log('[BG] Message received:', message.type);
@@ -44,6 +102,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message.type === 'GET_TOOLS') {
     sendResponse({ success: true, tools: getToolList() });
+    return true;
+  }
+
+  if (message.type === 'GET_CONVERSATION') {
+    sendResponse({ success: true, messages: conversationMessages });
+    return true;
+  }
+
+  if (message.type === 'CLEAR_CONVERSATION') {
+    await clearConversation();
+    sendResponse({ success: true });
     return true;
   }
 });
@@ -126,6 +195,9 @@ function stepDesc(toolCall) {
 async function startToolLoopTask(command) {
   const taskId = Date.now().toString();
 
+  // 确保会话上下文已加载
+  await loadConversation();
+
   await updateTaskStatus({
     id: taskId,
     queue: [],
@@ -202,7 +274,14 @@ async function startToolLoopTask(command) {
           logs: [...(currentTask.logs || []), `任务完成：${final}`]
         });
       }
+    }, {
+      existingMessages: conversationMessages.length > 0 ? conversationMessages : null
     });
+
+    // 保存会话上下文
+    if (loopResult.messages && loopResult.messages.length > 0) {
+      await saveConversation(loopResult.messages);
+    }
 
     const status = loopResult.success ? 'completed' : 'error';
     const finalText = loopResult.final || currentTask.finalResult;
@@ -250,5 +329,10 @@ async function startToolLoopTask(command) {
     });
 
     await addLog(`[执行] 任务失败：${error.message}`, 'error');
+
+    // 即使失败也保存会话上下文（错误信息已写入 currentTask 和 loopResult）
+    if (currentTask.logs?.length > 0) {
+      await saveConversation(conversationMessages);
+    }
   }
 }

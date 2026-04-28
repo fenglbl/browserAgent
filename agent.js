@@ -1025,6 +1025,11 @@ async function callChatCompletion(messages, config) {
 
   for (let attempt = 0; attempt <= API_MAX_RETRIES; attempt++) {
     try {
+      const isSystemPresent = messages.length > 0 && messages[0].role === 'system';
+      const apiMessages = isSystemPresent ? messages : [
+        { role: 'system', content: TOOL_LOOP_PROMPT },
+        ...messages
+      ];
       const response = await fetch(`${config.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -1033,10 +1038,7 @@ async function callChatCompletion(messages, config) {
         },
         body: JSON.stringify({
           model: config.model || 'gpt-4o',
-          messages: [
-            { role: 'system', content: TOOL_LOOP_PROMPT },
-            ...messages
-          ],
+          messages: apiMessages,
           temperature: 0.1,
           max_tokens: 900,
           tools: OPENAI_TOOLS,
@@ -1177,10 +1179,12 @@ async function executeToolCall(name, argsArray) {
   }
 }
 
-export async function runToolLoop(command, hooks = {}) {
+export async function runToolLoop(command, hooks = {}, options = {}) {
   const config = await getConfig();
   const maxTurns = hooks.maxTurns || 100;
-  const messages = [{ role: 'user', content: command }];
+  const messages = options.existingMessages && options.existingMessages.length > 0
+    ? [...options.existingMessages, { role: 'user', content: command }]
+    : [{ role: 'system', content: TOOL_LOOP_PROMPT }, { role: 'user', content: command }];
   const executedSteps = [];
 
   for (let turn = 0; turn < maxTurns; turn++) {
@@ -1191,7 +1195,8 @@ export async function runToolLoop(command, hooks = {}) {
 
     if (normalized.type === 'final') {
       const finalText = String(normalized.final || '').trim() || buildFallbackFinalText(executedSteps);
-      hooks.onFinal?.(finalText, { turn, messages, executedSteps });
+      hooks.onLog?.(`[ToolLoop] 模型直接返回 final：${finalText}`, 'info');
+      hooks.onFinal?.(finalText, { turn, messages, executedSteps, finalFromModel: true });
       return {
         success: true,
         final: finalText,
@@ -1211,7 +1216,8 @@ export async function runToolLoop(command, hooks = {}) {
 
           if (guardTool.name === 'final_answer') {
             const finalText = guardTool.argsArray?.[0] || '已停止执行。';
-            hooks.onFinal?.(finalText, { turn, messages, executedSteps, guardedStop: true });
+            hooks.onLog?.(`[ToolLoop] 意图护栏改为 final：${finalText}，原始工具：${toolCall.name}，原因：${guardTool.guardReason}`, 'warning');
+            hooks.onFinal?.(finalText, { turn, messages, executedSteps, guardedStop: true, guardReason: guardTool.guardReason });
             return {
               success: false,
               final: finalText,
@@ -1265,7 +1271,6 @@ export async function runToolLoop(command, hooks = {}) {
           result = await executeToolCall(recovery.toolName, recovery.argsArray);
         }
       }
-      console.log('result',result);
 
       executedSteps.push({
         turn: turn + 1,
@@ -1298,6 +1303,7 @@ export async function runToolLoop(command, hooks = {}) {
   }
 
   const final = '达到最大 tool loop 轮数，任务提前结束。';
+  hooks.onLog?.(`[ToolLoop] 达到最大轮数 maxTurns=${maxTurns}，任务提前结束。`, 'warning');
   hooks.onFinal?.(final, { turn: maxTurns, messages, executedSteps, maxTurnsReached: true });
   return {
     success: false,
