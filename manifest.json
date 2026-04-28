@@ -1,0 +1,42 @@
+{
+  "manifest_version": 3,
+  "name": "Browser Agent",
+  "version": "0.4.0",
+  "description": "AI-driven browser agent that executes user commands directly in the browser.",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "storage",
+    "activeTab",
+    "webNavigation",
+    "cookies"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Browser Agent Control"
+  },
+  "options_page": "options.html",
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ],
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+Y",
+        "mac": "Command+Shift+Y"
+      },
+      "description": "Open Agent Control Panel"
+    }
+  }
+}
